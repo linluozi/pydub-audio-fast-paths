@@ -1,0 +1,127 @@
+root  : E:\verify_pydub_final
+python: C:\Users\15082\AppData\Local\Programs\Python\Python312\python.exe
+scratch: E:\Claw\WorkBuddy-env\cn\temp\pydub-verify-e8zj51xm
+
+========================================================================
+0. build upstream / patched trees from the shipped sources
+========================================================================
+patching file pydub/silence.py
+patching file pydub/audio_segment.py
+patching file pydub/effects.py
+  PASS  patch applies cleanly with -p1
+  PASS  patched tree is byte-identical to the shipped reference tree
+
+========================================================================
+1. generate audio fixtures
+========================================================================
+audio_10s.wav              1764000 bytes
+  audio_30s.wav              5292000 bytes
+  audio_60s.wav             10584000 bytes
+  audio_thresh.wav           4586400 bytes
+  audio_huge.wav            17640000 bytes
+  audio_wide.wav            19000000 bytes
+  audio_ramp.wav              529200 bytes
+  audio_8bit_mono.wav          24000 bytes
+  audio_short.wav              48000 bytes
+  audio_32bit.wav            1058400 bytes
+  audio_24bit.wav             460800 bytes
+  audio_24bit_big.wav        1200000 bytes
+fixtures written to E:\Claw\WorkBuddy-env\cn\temp\pydub-verify-e8zj51xm\corpus
+  PASS  fixtures generated
+
+========================================================================
+2. differential probe (behaviour + structure)
+========================================================================
+behaviour checks: 77, mismatches: 0
+
+structure checks:
+  cdr_peak_alloc_mb          upstream=54.42    patched=4.11                   OK  (compressor must flush blocks instead of keeping one bytes per frame)
+  cdr_ratio_to_db_calls      upstream=309794   patched=8741                   OK  (compress_dynamic_range memoises ratio_to_db per distinct rms)
+  reader_is_fast             upstream=False    patched=True                   OK  (the sliding RMS reader must be available for this segment)
+  reader_parity              upstream=absent   patched=8 rows, 0 mismatched   OK  (sliding reader must equal get_sample_slice().rms on every probed index)
+  silence_segments_built     upstream=9001     patched=0                      OK  (detect_silence must not build one AudioSegment per window)
+
+wall clock for the whole probe: upstream 78.7s, patched 31.8s
+
+ALL CHECKS PASSED
+  PASS  differential probe passes
+
+========================================================================
+3. upstream test suite (failure set must be unchanged)
+========================================================================
+  base: 3 failed, 110 passed, 1 warning in 12.83s
+  pat: 3 failed, 110 passed, 1 warning in 8.24s
+  PASS  failure sets identical (3 on each side)
+  pre-existing failures: test_autodetect_format, test_from_file_clean_fail, test_split_on_silence_complete_silence
+
+========================================================================
+4. regression tests (must pass on patched, structural ones must fail on upstream)
+========================================================================
+  patched:  29 passed, 1 warning in 9.24s
+  PASS  all regression tests pass on the patched tree
+  upstream: 4 failed, 25 passed, 1 warning in 11.91s
+  PASS  structural tests go red on upstream (4 of them)
+
+========================================================================
+5. benchmark (interleaved, 5 rounds)
+========================================================================
+und 2  up=4.0891s pat=0.3985s  x10.26  (up 37MB / pat 37MB)
+  round 3  up=4.1886s pat=0.3949s  x10.61  (up 38MB / pat 38MB)
+  round 4  up=4.1817s pat=0.3957s  x10.57  (up 37MB / pat 37MB)
+  round 5  up=4.2319s pat=0.3910s  x10.82  (up 38MB / pat 38MB)
+  -> median speedup x10.57, RSS 38 -> 37 MB
+== fade_30s ==
+  round 1  up=0.0696s pat=0.0467s  x1.49  (up 37MB / pat 36MB)
+  round 2  up=0.0700s pat=0.0479s  x1.46  (up 37MB / pat 37MB)
+  round 3  up=0.0699s pat=0.0467s  x1.50  (up 37MB / pat 36MB)
+  round 4  up=0.0700s pat=0.0480s  x1.46  (up 37MB / pat 37MB)
+  round 5  up=0.0694s pat=0.0468s  x1.48  (up 37MB / pat 37MB)
+  -> median speedup x1.48, RSS 37 -> 37 MB
+== fade_60s ==
+  round 1  up=0.1416s pat=0.1009s  x1.40  (up 56MB / pat 56MB)
+  round 2  up=0.1466s pat=0.1054s  x1.39  (up 56MB / pat 56MB)
+  round 3  up=0.1421s pat=0.0981s  x1.45  (up 56MB / pat 56MB)
+  round 4  up=0.1410s pat=0.0987s  x1.43  (up 56MB / pat 56MB)
+  round 5  up=0.1492s pat=0.1097s  x1.36  (up 56MB / pat 56MB)
+  -> median speedup x1.40, RSS 56 -> 56 MB
+== load24_2mb ==
+  round 1  up=0.0183s pat=0.0015s  x11.99  (up 20MB / pat 20MB)
+  round 2  up=0.0185s pat=0.0010s  x18.75  (up 20MB / pat 20MB)
+  round 3  up=0.0191s pat=0.0010s  x19.59  (up 20MB / pat 19MB)
+  round 4  up=0.0183s pat=0.0011s  x17.43  (up 20MB / pat 20MB)
+  round 5  up=0.0188s pat=0.0011s  x17.69  (up 20MB / pat 20MB)
+  -> median speedup x17.69, RSS 20 -> 20 MB
+== load24_7mb ==
+  round 1  up=0.0484s pat=0.0025s  x19.15  (up 24MB / pat 24MB)
+  round 2  up=0.0496s pat=0.0027s  x18.68  (up 23MB / pat 24MB)
+  round 3  up=0.0484s pat=0.0023s  x20.84  (up 23MB / pat 24MB)
+  round 4  up=0.0483s pat=0.0022s  x22.21  (up 23MB / pat 24MB)
+  round 5  up=0.0503s pat=0.0023s  x22.09  (up 23MB / pat 24MB)
+  -> median speedup x20.84, RSS 23 -> 24 MB
+== amf_30s ==
+  round 1  up=0.2101s pat=0.0293s  x7.17  (up 38MB / pat 37MB)
+  round 2  up=0.2048s pat=0.0328s  x6.24  (up 38MB / pat 38MB)
+  round 3  up=0.2072s pat=0.0264s  x7.84  (up 38MB / pat 38MB)
+  round 4  up=0.2048s pat=0.0275s  x7.44  (up 37MB / pat 37MB)
+  round 5  up=0.2030s pat=0.0271s  x7.49  (up 38MB / pat 38MB)
+  -> median speedup x7.44, RSS 38 -> 38 MB
+== cdr_10s ==
+  round 1  up=1.1970s pat=0.6576s  x1.82  (up 78MB / pat 24MB)
+  round 2  up=1.1967s pat=0.6644s  x1.80  (up 78MB / pat 23MB)
+  round 3  up=1.2065s pat=0.6588s  x1.83  (up 79MB / pat 24MB)
+  round 4  up=1.2028s pat=0.6677s  x1.80  (up 78MB / pat 24MB)
+  round 5  up=1.2147s pat=0.6923s  x1.75  (up 79MB / pat 24MB)
+  -> median speedup x1.80, RSS 78 -> 24 MB
+== cdr_30s ==
+  round 1  up=4.3176s pat=2.0285s  x2.13  (up 200MB / pat 33MB)
+  round 2  up=4.0571s pat=2.0184s  x2.01  (up 200MB / pat 34MB)
+  round 3  up=4.0354s pat=2.0547s  x1.96  (up 200MB / pat 34MB)
+  round 4  up=4.4306s pat=2.0636s  x2.15  (up 200MB / pat 34MB)
+  round 5  up=4.0794s pat=2.0035s  x2.04  (up 200MB / pat 34MB)
+  -> median speedup x2.04, RSS 200 -> 34 MB
+
+wrote results.json
+  PASS  benchmark completed
+
+========================================================================
+ALL CHECKS PASSED

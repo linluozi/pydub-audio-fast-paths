@@ -1,0 +1,62 @@
+[
+  {
+    "name": "silence_10s",
+    "description": "detect_silence on 10 s stereo 44.1 kHz WAV (1 ms seek)",
+    "workload": "10 s",
+    "repeats": 3
+  },
+  {
+    "name": "silence_30s",
+    "description": "detect_silence on 30 s stereo 44.1 kHz WAV (1 ms seek)",
+    "workload": "30 s",
+    "repeats": 2
+  },
+  {
+    "name": "silence_60s",
+    "description": "detect_silence on 60 s stereo 44.1 kHz WAV (1 ms seek)",
+    "workload": "60 s",
+    "repeats": 2
+  },
+  {
+    "name": "fade_30s",
+    "description": "fade_in over a full 30 s stereo segment",
+    "workload": "30 s",
+    "repeats": 3
+  },
+  {
+    "name": "fade_60s",
+    "description": "fade_in over a full 60 s stereo segment",
+    "workload": "60 s",
+    "repeats": 2
+  },
+  {
+    "name": "load24_2mb",
+    "description": "AudioSegment.from_wav on a 30 KB 24-bit WAV (every sign-extension case)",
+    "workload": "10k samples",
+    "repeats": 5
+  },
+  {
+    "name": "load24_7mb",
+    "description": "AudioSegment.from_wav on a 2.4 MB 24-bit WAV (400 k stereo frames)",
+    "workload": "400k frames",
+    "repeats": 5
+  },
+  {
+    "name": "amf_30s",
+    "description": "apply_mono_filter_to_each_channel on 30 s stereo",
+    "workload": "30 s",
+    "repeats": 3
+  },
+  {
+    "name": "cdr_10s",
+    "description": "compress_dynamic_range on 10 s stereo",
+    "workload": "10 s",
+    "repeats": 2
+  },
+  {
+    "name": "cdr_30s",
+    "description": "compress_dynamic_range on 30 s stereo",
+    "workload": "30 s",
+    "repeats": 2
+  }
+]

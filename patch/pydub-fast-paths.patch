@@ -1,0 +1,483 @@
+--- a/pydub/silence.py
++++ b/pydub/silence.py
+@@ -2,8 +2,182 @@
+ Various functions for finding/manipulating silence in AudioSegments
+ """
+ import itertools
++import math
++from operator import mul
+ 
+-from .utils import db_to_float
++from .utils import db_to_float, audioop
++
++# Sample codes usable with memoryview.cast(), keyed by sample width in bytes.
++_SAMPLE_CODES = {1: 'b', 2: 'h', 4: 'i'}
++
++# Sums of squares are accumulated as Python ints and only turned into a float
++# for the final square root.  For 8 and 16 bit samples every window sum stays
++# below 2**53, so the int -> float conversion is lossless and the result is
++# bit-identical to audioop.rms (which accumulates in a C double).  32 bit
++# samples can exceed that range, so they keep calling audioop.rms directly.
++_EXACT_SUM_LIMIT = 2 ** 53
++
++_MISSING = object()
++
++
++def _sum_squares(samples):
++    """Sum of squares of a flat sample sequence, as an exact Python int."""
++    return sum(map(mul, samples, samples))
++
++
++def _make_rms_reader(audio_segment):
++    """
++    Build a callable ``read(start_ms, end_ms)`` returning exactly what
++    ``audio_segment[start_ms:end_ms].rms`` returns, but without allocating an
++    AudioSegment (and its frame-width bookkeeping) for every window.
++
++    Consecutive windows reuse the running sum of squares, so the whole scan
++    costs one pass over the samples instead of one pass per window.
++
++    Returns None if this segment cannot be handled by the fast path; callers
++    must then fall back to the slicing API.
++    """
++    if not hasattr(memoryview(b''), 'cast'):  # Python 2.7 has no cast()
++        return None
++
++    sample_width = audio_segment.sample_width
++    code = _SAMPLE_CODES.get(sample_width)
++    if code is None:
++        return None
++
++    frame_width = audio_segment.frame_width
++    data = audio_segment._data
++    if frame_width <= 0 or len(data) % frame_width:
++        return None
++
++    total_frames = len(data) // frame_width
++    samples_per_frame = audio_segment.channels
++    if samples_per_frame <= 0:
++        return None
++    try:
++        view = memoryview(data).cast(code)
++    except (TypeError, ValueError):
++        return None
++    total_samples = len(view)
++    # AudioSegment._parse_position() computes int(ms * (frame_rate / 1000.0));
++    # the parenthesisation matters for float rounding, keep it identical.
++    frames_per_ms = audio_segment.frame_rate / 1000.0
++    exact = sample_width < 4
++    previous = [None, 0]  # [last (lo, hi) sample range, running sum]
++
++    def read(start_ms, end_ms):
++        start_frame = int(start_ms * frames_per_ms)
++        end_frame = int(end_ms * frames_per_ms)
++        if start_frame < 0 or end_frame < start_frame or end_frame > total_frames:
++            return _MISSING
++        lo = start_frame * samples_per_frame
++        hi = end_frame * samples_per_frame
++        if hi > total_samples:
++            return _MISSING
++        if not exact:
++            # Let audioop do the accumulation so the result stays bit-exact
++            # for wide samples; we still save the per-window AudioSegment.
++            return audioop.rms(view[lo:hi], sample_width)
++
++        if previous[0] is not None and previous[0][0] <= lo and previous[0][1] <= hi:
++            last_lo, last_hi = previous[0]
++            total = previous[1]
++            total += _sum_squares(view[last_hi:hi])
++            total -= _sum_squares(view[last_lo:lo])
++        else:
++            total = _sum_squares(view[lo:hi])
++        previous[0] = (lo, hi)
++        previous[1] = total
++
++        count = hi - lo
++        if not count:
++            return 0
++        if total > _EXACT_SUM_LIMIT:
++            # Windows made of many full-scale samples can leave the
++            # exactly-representable float range.  The running sum stays exact
++            # (it is a Python int), only the division would round, so defer to
++            # audioop for this one window instead of restarting the scan.
++            return audioop.rms(view[lo:hi], sample_width)
++        return int(math.sqrt(total / count))
++
++    return read
++
++
++def _make_frame_rms_reader(audio_segment, look_frames):
++    """
++    Build a callable ``read(frame_i)`` returning exactly what
++    ``audio_segment.get_sample_slice(frame_i - look_frames, frame_i).rms``
++    returns, without allocating one AudioSegment per frame.
++
++    Used by the dynamic range compressor, which asks for the RMS of a sliding
++    window once per sample frame (44100 windows per second of audio).
++
++    Returns None when the segment cannot be handled by the fast path.
++    """
++    if not hasattr(memoryview(b''), 'cast'):  # Python 2.7 has no cast()
++        return None
++
++    sample_width = audio_segment.sample_width
++    code = _SAMPLE_CODES.get(sample_width)
++    if code is None:
++        return None
++
++    frame_width = audio_segment.frame_width
++    data = audio_segment._data
++    samples_per_frame = audio_segment.channels
++    if frame_width <= 0 or samples_per_frame <= 0 or len(data) % frame_width:
++        return None
++
++    total_frames = len(data) // frame_width
++    try:
++        view = memoryview(data).cast(code)
++    except (TypeError, ValueError):
++        return None
++    total_samples = len(view)
++    exact = sample_width < 4
++    # get_sample_slice() clamps both bounds to int(frame_count()).
++    limit = int(audio_segment.frame_count())
++    if limit > total_frames:
++        limit = total_frames
++    state = {'lo': None, 'hi': None, 'total': 0}
++
++    def read(frame_i):
++        start = frame_i - look_frames
++        if start < 0:
++            start = 0
++        elif start > limit:
++            start = limit
++        end = frame_i
++        if end < 0:
++            end = 0
++        elif end > limit:
++            end = limit
++        lo = start * samples_per_frame
++        hi = end * samples_per_frame
++        if lo > hi or hi > total_samples:
++            return _MISSING
++
++        if not exact:
++            return audioop.rms(view[lo:hi], sample_width)
++
++        if state['lo'] is not None and state['lo'] <= lo and state['hi'] <= hi:
++            total = state['total']
++            total += _sum_squares(view[state['hi']:hi])
++            total -= _sum_squares(view[state['lo']:lo])
++        else:
++            total = _sum_squares(view[lo:hi])
++        state['lo'] = lo
++        state['hi'] = hi
++        state['total'] = total
++
++        count = hi - lo
++        if not count:
++            return 0
++        if total > _EXACT_SUM_LIMIT:
++            return audioop.rms(view[lo:hi], sample_width)
++        return int(math.sqrt(total / count))
++
++    return read
+ 
+ 
+ def detect_silence(audio_segment, min_silence_len=1000, silence_thresh=-16, seek_step=1):
+@@ -38,9 +212,16 @@
+     if last_slice_start % seek_step:
+         slice_starts = itertools.chain(slice_starts, [last_slice_start])
+ 
++    read_rms = _make_rms_reader(audio_segment)
+     for i in slice_starts:
+-        audio_slice = audio_segment[i:i + min_silence_len]
+-        if audio_slice.rms <= silence_thresh:
++        window_rms = _MISSING
++        if read_rms is not None:
++            window_rms = read_rms(i, i + min_silence_len)
++        if window_rms is _MISSING:
++            # Unusual layout (or a window the fast path refuses): use the
++            # public slicing API so behaviour stays exactly as documented.
++            window_rms = audio_segment[i:i + min_silence_len].rms
++        if window_rms <= silence_thresh:
+             silence_starts.append(i)
+ 
+     # short circuit when there is no silence
+@@ -171,12 +352,14 @@
+     silence_threshold - the upper bound for how quiet is silent in dFBS
+     chunk_size - chunk size for interating over the segment in ms
+     """
++    if chunk_size <= 0:
++        # Same exception type as the ``assert`` this replaces, but it also
++        # survives ``python -O`` (where asserts are stripped and the loop
++        # below would spin forever).
++        raise AssertionError("chunk_size must be a positive number of milliseconds")
+     trim_ms = 0 # ms
+-    assert chunk_size > 0 # to avoid infinite loop
+     while sound[trim_ms:trim_ms+chunk_size].dBFS < silence_threshold and trim_ms < len(sound):
+         trim_ms += chunk_size
+ 
+     # if there is no end it should return the length of the segment
+     return min(trim_ms, len(sound))
+-
+-
+--- a/pydub/audio_segment.py
++++ b/pydub/audio_segment.py
+@@ -149,6 +149,34 @@
+     data[pos + 4:pos + 8] = struct.pack('<I', len(data) - pos - 8)
+ 
+ 
++# High byte for each possible low-order byte of a 24 bit sample: 0x00 for
++# values whose top byte is below 0x80 (non-negative), 0xFF for negative ones.
++_24BIT_SIGN_PAD = bytes(bytearray(0 if i < 0x80 else 0xFF for i in range(256)))
++
++
++def _expand_24bit(data):
++    """
++    Widen packed 24 bit little-endian samples to 32 bit by sign extension.
++
++    Equivalent to walking ``zip(*[iter(data)]*3)`` in Python and emitting
++    ``pad(b2) + b0 + b1 + b2`` for each triple, but the four output planes are
++    filled with slice assignment instead of one Python-level iteration per
++    sample (a 7 MB file has 2.6 M samples).
++    """
++    frames = len(data) // 3
++    if not frames:
++        return b''
++    out = bytearray(frames * 4)
++    low = data[0:frames * 3:3]
++    mid = data[1:frames * 3:3]
++    high = data[2:frames * 3:3]
++    out[0::4] = high.translate(_24BIT_SIGN_PAD)
++    out[1::4] = low
++    out[2::4] = mid
++    out[3::4] = high
++    return bytes(out)
++
++
+ class AudioSegment(object):
+     """
+     AudioSegments are *immutable* objects representing segments of audio
+@@ -235,23 +263,13 @@
+         # Convert 24-bit audio to 32-bit audio.
+         # (stdlib audioop and array modules do not support 24-bit data)
+         if self.sample_width == 3:
+-            byte_buffer = BytesIO()
+-
+-            # Workaround for python 2 vs python 3. _data in 2.x are length-1 strings,
+-            # And in 3.x are ints.
+-            pack_fmt = 'BBB' if isinstance(self._data[0], int) else 'ccc'
+-
+             # This conversion maintains the 24 bit values.  The values are
+             # not scaled up to the 32 bit range.  Other conversions could be
+             # implemented.
+-            i = iter(self._data)
+-            padding = {False: b'\x00', True: b'\xFF'}
+-            for b0, b1, b2 in izip(i, i, i):
+-                byte_buffer.write(padding[b2 > b'\x7f'[0]])
+-                old_bytes = struct.pack(pack_fmt, b0, b1, b2)
+-                byte_buffer.write(old_bytes)
+-
+-            self._data = byte_buffer.getvalue()
++            #
++            # Each 3-byte sample becomes 4 bytes: a sign-extension byte
++            # followed by the original three bytes, little-endian.
++            self._data = _expand_24bit(self._data)
+             self.sample_width = 4
+             self.frame_width = self.channels * self.sample_width
+ 
+@@ -1327,8 +1345,30 @@
+ 
+         output = []
+ 
++        # Slice the raw buffer directly instead of building one AudioSegment
++        # per millisecond: `self[i]` allocates a fresh object (and re-derives
++        # its metadata) just to hand `_data` to audioop on the next line.
++        frame_width = self.frame_width
++        raw = self._data
++
++        def frame_bounds(ms):
++            # Mirrors __getitem__ + _parse_position(): clamp to the segment
++            # length, resolve negatives from the end, then convert ms to
++            # frames with exactly the same float expression.
++            if ms > len(self) or ms == float("inf"):
++                ms = len(self)
++            if ms < 0:
++                ms = len(self) - abs(ms)
++            return int(self.frame_count(ms=ms)) * frame_width
++
++        # __getitem__ resolves an omitted stop to len(self), which is a
++        # *rounded* millisecond count; a segment can therefore hold up to
++        # frame_width-1 extra bytes past that point.  Slicing to the end of the
++        # buffer would keep them, so cut where the slicing API cuts.
++        segment_end = frame_bounds(len(self))
++
+         # original data - up until the crossfade portion, as is
+-        before_fade = self[:start]._data
++        before_fade = raw[:frame_bounds(start)]
+         if from_gain != 0:
+             before_fade = audioop.mul(before_fade,
+                                       self.sample_width,
+@@ -1345,8 +1385,8 @@
+ 
+             for i in range(duration):
+                 volume_change = from_power + (scale_step * i)
+-                chunk = self[start + i]
+-                chunk = audioop.mul(chunk._data,
++                chunk = raw[frame_bounds(start + i):frame_bounds(start + i + 1)]
++                chunk = audioop.mul(chunk,
+                                     self.sample_width,
+                                     volume_change)
+ 
+@@ -1359,13 +1399,14 @@
+ 
+             for i in range(int(fade_frames)):
+                 volume_change = from_power + (scale_step * i)
+-                sample = self.get_frame(int(start_frame + i))
++                start_i = int(start_frame + i) * frame_width
++                sample = raw[start_i:start_i + frame_width]
+                 sample = audioop.mul(sample, self.sample_width, volume_change)
+ 
+                 output.append(sample)
+ 
+         # original data after the crossfade portion, at the new volume
+-        after_fade = self[end:]._data
++        after_fade = raw[min(frame_bounds(end), segment_end):segment_end]
+         if to_gain != 0:
+             after_fade = audioop.mul(after_fade,
+                                      self.sample_width,
+--- a/pydub/effects.py
++++ b/pydub/effects.py
+@@ -10,11 +10,15 @@
+     get_min_max_value
+ )
+ from .silence import split_on_silence
++from .silence import _make_frame_rms_reader
+ from .exceptions import TooManyMissingFrames, InvalidDuration
+ 
+ if sys.version_info >= (3, 0):
+     xrange = range
+ 
++# Sentinel so a memoised 0.0 is not confused with "not computed yet".
++_CACHE_MISS = object()
++
+ 
+ @register_pydub_effect
+ def apply_mono_filter_to_each_channel(seg, filter_fn):
+@@ -23,11 +27,13 @@
+     channel_segs = seg.split_to_mono()
+     channel_segs = [filter_fn(channel_seg) for channel_seg in channel_segs]
+ 
+-    out_data = seg.get_array_of_samples()
++    # Interleave with strided slice assignment instead of a Python loop over
++    # every sample: the per-sample loop costs one interpreter iteration per
++    # sample and a bounds-checked item assignment per channel.
++    out_data = array.array(seg.array_type, bytes(len(seg.raw_data)))
+     for channel_i, channel_seg in enumerate(channel_segs):
+-        for sample_i, sample in enumerate(channel_seg.get_array_of_samples()):
+-            index = (sample_i * n_channels) + channel_i
+-            out_data[index] = sample
++        out_data[channel_i::n_channels] = array.array(
++            channel_seg.array_type, channel_seg.raw_data)
+ 
+     return seg._spawn(out_data)
+ 
+@@ -143,10 +149,14 @@
+     """
+ 
+     thresh_rms = seg.max_possible_amplitude * db_to_float(threshold)
+-    
++
+     look_frames = int(seg.frame_count(ms=attack))
+-    def rms_at(frame_i):
+-        return seg.get_sample_slice(frame_i - look_frames, frame_i).rms
++    rms_reader = _make_frame_rms_reader(seg, look_frames)
++    if rms_reader is None:
++        def rms_at(frame_i):
++            return seg.get_sample_slice(frame_i - look_frames, frame_i).rms
++    else:
++        rms_at = rms_reader
+     def db_over_threshold(rms):
+         if rms == 0: return 0.0
+         db = ratio_to_db(rms / thresh_rms)
+@@ -156,34 +166,65 @@
+ 
+     # amount to reduce the volume of the audio by (in dB)
+     attenuation = 0.0
+-    
++
+     attack_frames = seg.frame_count(ms=attack)
+     release_frames = seg.frame_count(ms=release)
+-    for i in xrange(int(seg.frame_count())):
++    # max_attenuation only depends on the integer rms of the window, and real
++    # audio revisits the same rms value constantly (8742 distinct values across
++    # 441000 frames of speech).  Memoise the dB conversion so the inner loop
++    # only does the envelope arithmetic.
++    attenuation_cache = {}
++
++    frame_width = seg.frame_width
++    raw = seg._data
++    n_frames = int(seg.frame_count())
++
++    # Accumulate into a bytearray and flush whole blocks.  Keeping one bytes
++    # object per frame costs ~40 bytes of allocator overhead each: for a 30 s
++    # stereo file (1.32 M frames) that is ~170 MB of peak RSS to carry 5 MB of
++    # audio.  Copying each frame into a bytearray frees it immediately, so peak
++    # allocation stays near the block size.
++    output = []
++    block = bytearray()
++    block_limit = 1 << 20
++
++    def flush():
++        if block:
++            output.append(bytes(block))
++            del block[:]
++
++    for i in xrange(n_frames):
+         rms_now = rms_at(i)
+-        
++
+         # with a ratio of 4.0 this means the volume will exceed the threshold by
+         # 1/4 the amount (of dB) that it would otherwise
+-        max_attenuation = (1 - (1.0 / ratio)) * db_over_threshold(rms_now)
+-        
++        max_attenuation = attenuation_cache.get(rms_now, _CACHE_MISS)
++        if max_attenuation is _CACHE_MISS:
++            max_attenuation = (1 - (1.0 / ratio)) * db_over_threshold(rms_now)
++            attenuation_cache[rms_now] = max_attenuation
++
+         attenuation_inc = max_attenuation / attack_frames
+         attenuation_dec = max_attenuation / release_frames
+-        
++
+         if rms_now > thresh_rms and attenuation <= max_attenuation:
+             attenuation += attenuation_inc
+             attenuation = min(attenuation, max_attenuation)
+         else:
+             attenuation -= attenuation_dec
+             attenuation = max(attenuation, 0)
+-        
+-        frame = seg.get_frame(i)
+-        if attenuation != 0.0:
+-            frame = audioop.mul(frame,
+-                                seg.sample_width,
+-                                db_to_float(-attenuation))
+-        
+-        output.append(frame)
+-    
++
++        start = i * frame_width
++        if attenuation == 0.0:
++            block += raw[start:start + frame_width]
++        else:
++            block += audioop.mul(raw[start:start + frame_width],
++                                 seg.sample_width,
++                                 db_to_float(-attenuation))
++
++        if len(block) >= block_limit:
++            flush()
++    flush()
++
+     return seg._spawn(data=b''.join(output))
+ 
+ 
