@@ -1,6 +1,7 @@
 # pydub — audio fast paths
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-c8892b.svg)](#compatibility)
+[![verify](https://github.com/linluozi/pydub-audio-fast-paths/actions/workflows/verify.yml/badge.svg)](https://github.com/linluozi/pydub-audio-fast-paths/actions/workflows/verify.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-c8892b.svg)](#compatibility)
 [![License MIT](https://img.shields.io/badge/license-MIT-c8892b.svg)](LICENSE)
 [![fork of pydub 0.25.1](https://img.shields.io/badge/fork%20of-pydub%200.25.1-b4552f.svg)](https://github.com/jiaaro/pydub)
 [![mutation score 26/26](https://img.shields.io/badge/mutation%20score-26%2F26-6b6b3a.svg)](#verification)
@@ -188,12 +189,23 @@ patch itself:
 | patch fidelity | `upstream/` + patch == shipped `patched/`, byte for byte | identical |
 | differential probe | 77 public results compared to upstream | **77/77 identical** |
 | structure | counters show the fast path is still present | 5/5 |
-| upstream suite | same failures as unpatched | 111 passed / 2 failed, **failure set identical** |
+| upstream suite | same failures as unpatched | **failure set identical** (see below) |
 | regression tests | 29 tests pass on patched, structural ones fail on upstream | 29 passed / 4 red on upstream |
 
-The two pre-existing upstream failures are `assertEquals` removals in Python 3.12
-(`test_from_file_clean_fail`, `test_split_on_silence_complete_silence`); they fail
-identically before and after the patch.
+The same `verify.py` runs in CI on Linux and Windows across Python 3.9 and 3.12
+(`.github/workflows/verify.yml`), and the upstream suite result differs by
+interpreter, which pins down exactly what those two failures are:
+
+| interpreter | upstream suite | conclusion |
+|---|---|---|
+| Python 3.9 | **113 passed, 0 failed** | the patch breaks nothing at all |
+| Python 3.12 | 111 passed, 2 failed — same 2 on both arms | `assertEquals` was removed in 3.12; pre-existing |
+
+The two failures are `test_from_file_clean_fail` and
+`test_split_on_silence_complete_silence`, both of which call the removed
+`unittest.TestCase.assertEquals`. They fail identically before and after the
+patch, and they do not fail at all on 3.9 — so they are a property of the
+interpreter, not of this change.
 
 ### Mutation score 26/26
 
@@ -236,10 +248,11 @@ sequences `patch` would otherwise try to interpret.
 
 ## Compatibility
 
-Tested on CPython 3.12.10 (Windows 11). The code stays Python 2.7-compatible in
-style — no f-strings, no `memoryview.cast` assumption (guarded by `hasattr`), the
-`xrange` alias preserved — because upstream still advertises 2.7/3.4+ in
-`setup.py` and `appveyor.yml`.
+Verified by CI on CPython **3.9 and 3.12**, on both **Linux and Windows**; the
+benchmark numbers in this README were taken on 3.12.10 / Windows 11. The code
+stays Python 2.7-compatible in style — no f-strings, no `memoryview.cast`
+assumption (guarded by `hasattr`), the `xrange` alias preserved — because
+upstream still advertises 2.7/3.4+ in `setup.py` and `appveyor.yml`.
 
 On Python 3.13+, `audioop` is gone and pydub already falls back to `pyaudioop`.
 The exact-integer path does not depend on which one is present, and the 2^53
