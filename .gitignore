@@ -10,3 +10,11 @@ aa_results.json
 corpus/
 .venv/
 venv/
+
+# verification output, written by ad-hoc runs
+v*.txt
+ci_raw.log
+jobs.json
+readme_render.png
+render_check.png
+_check.html
